@@ -43,7 +43,10 @@ class ChatBotModel(object):
 
         # Our targets are decoder inputs shifted by one (to ignore <s> symbol)
         self.targets = self.decoder_inputs[1:]
-        
+
+    def single_cell(self):
+      return tf.contrib.rnn.GRUCell(config.HIDDEN_SIZE)
+
     def _inference(self):
         print('Create inference')
         # If we use sampled softmax, we need an output projection.
@@ -53,20 +56,27 @@ class ChatBotModel(object):
             b = tf.get_variable('proj_b', [config.DEC_VOCAB])
             self.output_projection = (w, b)
 
-        def sampled_loss(inputs, labels):
+        def sampled_loss(labels, inputs):
             labels = tf.reshape(labels, [-1, 1])
-            return tf.nn.sampled_softmax_loss(tf.transpose(w), b, inputs, labels, 
-                                              config.NUM_SAMPLES, config.DEC_VOCAB)
+            local_w_t = tf.cast(w, tf.float32)
+            local_b = tf.cast(b, tf.float32)
+            local_inputs = tf.cast(inputs, tf.float32)
+            return tf.nn.sampled_softmax_loss(weights=tf.transpose(local_w_t),
+                                              biases=local_b,
+                                              labels=labels,
+                                              inputs=local_inputs,
+                                              num_sampled=config.NUM_SAMPLES,
+                                              num_classes=config.DEC_VOCAB)
         self.softmax_loss_function = sampled_loss
 
-        single_cell = tf.nn.rnn_cell.GRUCell(config.HIDDEN_SIZE)
-        self.cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * config.NUM_LAYERS)
+        # single_cell = tf.contrib.rnn.GRUCell(config.HIDDEN_SIZE, reuse=True)
+        self.cell = tf.contrib.rnn.MultiRNNCell([self.single_cell() for _  in range(config.NUM_LAYERS)])
 
     def _create_loss(self):
         print('Creating loss... \nIt might take a couple of minutes depending on how many buckets you have.')
         start = time.time()
         def _seq2seq_f(encoder_inputs, decoder_inputs, do_decode):
-            return tf.nn.seq2seq.embedding_attention_seq2seq(
+            return tf.contrib.legacy_seq2seq.embedding_attention_seq2seq(
                     encoder_inputs, decoder_inputs, self.cell,
                     num_encoder_symbols=config.ENC_VOCAB,
                     num_decoder_symbols=config.DEC_VOCAB,
@@ -75,28 +85,28 @@ class ChatBotModel(object):
                     feed_previous=do_decode)
 
         if self.fw_only:
-            self.outputs, self.losses = tf.nn.seq2seq.model_with_buckets(
-                                        self.encoder_inputs, 
-                                        self.decoder_inputs, 
+            self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
+                                        self.encoder_inputs,
+                                        self.decoder_inputs,
                                         self.targets,
-                                        self.decoder_masks, 
-                                        config.BUCKETS, 
+                                        self.decoder_masks,
+                                        config.BUCKETS,
                                         lambda x, y: _seq2seq_f(x, y, True),
                                         softmax_loss_function=self.softmax_loss_function)
             # If we use output projection, we need to project outputs for decoding.
             if self.output_projection:
                 for bucket in xrange(len(config.BUCKETS)):
-                    self.outputs[bucket] = [tf.matmul(output, 
+                    self.outputs[bucket] = [tf.matmul(output,
                                             self.output_projection[0]) + self.output_projection[1]
                                             for output in self.outputs[bucket]]
         else:
-            self.outputs, self.losses = tf.nn.seq2seq.model_with_buckets(
-                                        self.encoder_inputs, 
-                                        self.decoder_inputs, 
-                                        self.targets,
-                                        self.decoder_masks,
-                                        config.BUCKETS,
-                                        lambda x, y: _seq2seq_f(x, y, False),
+            self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
+                                        encoder_inputs=self.encoder_inputs,
+                                        decoder_inputs=self.decoder_inputs,
+                                        targets=self.targets,
+                                        weights=self.decoder_masks,
+                                        buckets=config.BUCKETS,
+                                        seq2seq=lambda x, y: _seq2seq_f(x, y, False),
                                         softmax_loss_function=self.softmax_loss_function)
         print('Time:', time.time() - start)
 
